@@ -11,14 +11,12 @@ const DEFAULT_CONFIG = {
 let cachedConfig = null;
 let lastCacheTime = 0;
 
-// 核心改动：通过 Hyperdrive 提供的连接字符串获取连接
+// 核心改动：增加 disableEval: true 禁用动态代码生成，完美适配 Cloudflare Workers
 async function getDb(env) {
     if (!env.HYPERDRIVE) throw new Error("Hyperdrive is not bound.");
-    
-    // Hyperdrive 会把外部 MySQL 转换为 PostgreSQL 协议暴露给 Worker
-    // 但因为你选择的是 MySQL 类型，我们使用 mysql2 库连接这个被代理后的地址
     return await mysql.createConnection({
-        uri: env.HYPERDRIVE.connectionString, 
+        uri: env.HYPERDRIVE.connectionString,
+        disableEval: true  // <--- 就是这一行救了命！
     });
 }
 
@@ -71,7 +69,6 @@ async function logVisit(env, request, action) {
         db = await getDb(env);
         await db.query(`INSERT INTO proxy_visit_logs (ip, geo, action, timestamp) VALUES (?, ?, ?, ?)`, [ip, geo, action, timestamp]);
         
-        // 清理冗余日志
         await db.query(`DELETE FROM proxy_visit_logs WHERE id NOT IN (SELECT id FROM (SELECT id FROM proxy_visit_logs ORDER BY id DESC LIMIT 1000) tmp)`);
         await db.end();
     } catch (e) { 
