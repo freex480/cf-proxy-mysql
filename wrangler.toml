@@ -2,9 +2,8 @@ name = "cf-proxy-mysql"
 main = "src/index.js"
 compatibility_date = "2024-04-01"
 compatibility_flags = ["nodejs_compat"]
+node_compat = true
 
 [vars]
-# 你的 MySQL 数据库连接串
 DB_URL = "mysql://miaomi:nNERmxNZh6NuF4oU@mysql6.sqlpub.com:3311/miaomi"
-# 你的后台管理员密码 (建议修改为你想用的密码)
-ADMIN_PASS = "112233"
+ADMIN_PASS = "admin"
