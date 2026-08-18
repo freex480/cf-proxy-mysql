@@ -1,4 +1,4 @@
-import mysql from 'mysql2/promise';
+import { createClient } from '@libsql/client/web';
 
 const DEFAULT_CONFIG = {
     siteTitle: "星空漫游",
@@ -11,70 +11,65 @@ const DEFAULT_CONFIG = {
 let cachedConfig = null;
 let lastCacheTime = 0;
 
-// 核心改动：增加 disableEval: true 禁用动态代码生成，完美适配 Cloudflare Workers
-async function getDb(env) {
-    if (!env.HYPERDRIVE) throw new Error("Hyperdrive is not bound.");
-    return await mysql.createConnection({
-        uri: env.HYPERDRIVE.connectionString,
-        disableEval: true  // <--- 就是这一行救了命！
+// 连接 Turso 数据库 (纯 HTTP/Web 协议，永远不卡死)
+function getDb(env) {
+    return createClient({
+        url: env.TURSO_DB_URL,
+        authToken: env.TURSO_AUTH_TOKEN
     });
 }
 
+// 自动建表 (SQLite 语法)
 async function initTables(db) {
-    await db.query(`CREATE TABLE IF NOT EXISTS proxy_config (k VARCHAR(255) PRIMARY KEY, v TEXT)`);
-    await db.query(`CREATE TABLE IF NOT EXISTS proxy_notes (id VARCHAR(50) PRIMARY KEY, content TEXT, password VARCHAR(255), expireAt BIGINT, isBurn TINYINT(1), ip VARCHAR(255), geo VARCHAR(255), timestamp BIGINT)`);
-    await db.query(`CREATE TABLE IF NOT EXISTS proxy_private_notes (id VARCHAR(50) PRIMARY KEY, title VARCHAR(255), content TEXT, timestamp BIGINT)`);
-    await db.query(`CREATE TABLE IF NOT EXISTS proxy_visit_logs (id INT AUTO_INCREMENT PRIMARY KEY, ip VARCHAR(255), geo VARCHAR(255), action VARCHAR(255), timestamp BIGINT)`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS proxy_config (k TEXT PRIMARY KEY, v TEXT)`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS proxy_notes (id TEXT PRIMARY KEY, content TEXT, password TEXT, expireAt INTEGER, isBurn INTEGER, ip TEXT, geo TEXT, timestamp INTEGER)`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS proxy_private_notes (id TEXT PRIMARY KEY, title TEXT, content TEXT, timestamp INTEGER)`);
+    await db.execute(`CREATE TABLE IF NOT EXISTS proxy_visit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT, geo TEXT, action TEXT, timestamp INTEGER)`);
 }
 
 async function getConfig(env, ctx) {
     if (cachedConfig && (Date.now() - lastCacheTime < 60000)) return cachedConfig;
-    let db;
     try {
-        db = await getDb(env);
+        const db = getDb(env);
         await initTables(db);
-        const [rows] = await db.query('SELECT k, v FROM proxy_config');
+        const res = await db.execute('SELECT k, v FROM proxy_config');
         let cfg = { ...DEFAULT_CONFIG };
-        rows.forEach(row => { cfg[row.k] = row.v; });
+        res.rows.forEach(row => { cfg[row.k] = row.v; });
         
         const now = Date.now();
-        await db.query(`DELETE FROM proxy_notes WHERE expireAt IS NOT NULL AND expireAt <= ?`, [now]);
+        await db.execute({ sql: `DELETE FROM proxy_notes WHERE expireAt IS NOT NULL AND expireAt <= ?`, args: [now] });
         
-        await db.end();
         cachedConfig = cfg; lastCacheTime = Date.now();
         return cfg;
     } catch (e) { 
-        if(db) try{ await db.end(); }catch(err){}
         console.error("Config DB Error:", e);
         return DEFAULT_CONFIG; 
     }
 }
 
 async function getPublicNotes(db) {
-    const [rows] = await db.query(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
-    return rows.map(n => ({
+    const res = await db.execute(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
+    return res.rows.map(n => ({
         id: n.id,
         content: n.password ? '🔒 [加密数据] 请解锁后查看全文...' : (n.isBurn ? '🔥 [阅后即焚] 打开后将永久销毁...' : n.content),
-        hasPassword: !!n.password, isBurn: !!n.isBurn, timestamp: parseInt(n.timestamp)
+        hasPassword: !!n.password, isBurn: !!n.isBurn, timestamp: Number(n.timestamp)
     }));
 }
 
 async function logVisit(env, request, action) {
-    let db;
     try {
         const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || '未知 IP';
         const geo = [(request.cf?.country || ''), (request.cf?.city || '')].filter(Boolean).join(', ') || '未知地域';
         const timestamp = Date.now();
         
-        db = await getDb(env);
-        await db.query(`INSERT INTO proxy_visit_logs (ip, geo, action, timestamp) VALUES (?, ?, ?, ?)`, [ip, geo, action, timestamp]);
+        const db = getDb(env);
+        await db.execute({
+            sql: `INSERT INTO proxy_visit_logs (ip, geo, action, timestamp) VALUES (?, ?, ?, ?)`,
+            args: [ip, geo, action, timestamp]
+        });
         
-        await db.query(`DELETE FROM proxy_visit_logs WHERE id NOT IN (SELECT id FROM (SELECT id FROM proxy_visit_logs ORDER BY id DESC LIMIT 1000) tmp)`);
-        await db.end();
-    } catch (e) { 
-        if(db) try{ await db.end(); }catch(err){}
-        console.error("Log Visit Error:", e);
-    }
+        await db.execute(`DELETE FROM proxy_visit_logs WHERE id NOT IN (SELECT id FROM proxy_visit_logs ORDER BY id DESC LIMIT 1000)`);
+    } catch (e) {}
 }
 
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
@@ -105,40 +100,43 @@ export default {
         const adminPass = env.ADMIN_PASS || 'admin';
 
         if (url.pathname === '/api/notes' && request.method === 'POST') {
-            let db;
             try {
-                const body = await request.json(); const action = body.action; db = await getDb(env);
+                const body = await request.json(); const action = body.action; 
+                const db = getDb(env);
                 const clientIp = request.headers.get('cf-connecting-ip') || request.headers.get('x-real-ip') || '未知 IP';
                 const geoInfo = [request.cf?.country, request.cf?.city].filter(Boolean).join(', ') || '未知地域';
 
                 if (action === 'get') {
-                    const [rows] = await db.query(`SELECT * FROM proxy_notes WHERE id = ?`, [body.id]);
-                    if (rows.length === 0) { await db.end(); return new Response(JSON.stringify({ error: "数据已丢失或已焚毁" }), { status: 404 }); }
-                    const note = rows[0];
-                    if (note.password && note.password !== body.password && body.password !== adminPass) { await db.end(); return new Response(JSON.stringify({ error: "密码错误，拒绝访问" }), { status: 403 }); }
+                    const res = await db.execute({ sql: `SELECT * FROM proxy_notes WHERE id = ?`, args: [body.id] });
+                    if (res.rows.length === 0) return new Response(JSON.stringify({ error: "数据已丢失或已焚毁" }), { status: 404 }); 
+                    const note = res.rows[0];
+                    if (note.password && note.password !== body.password && body.password !== adminPass) return new Response(JSON.stringify({ error: "密码错误，拒绝访问" }), { status: 403 }); 
                     let content = note.content;
-                    if (note.isBurn) await db.query(`DELETE FROM proxy_notes WHERE id = ?`, [body.id]);
-                    await db.end(); return new Response(JSON.stringify({ success: true, content: content }), { headers: { 'Content-Type': 'application/json' } });
+                    if (note.isBurn) await db.execute({ sql: `DELETE FROM proxy_notes WHERE id = ?`, args: [body.id] });
+                    return new Response(JSON.stringify({ success: true, content: content }), { headers: { 'Content-Type': 'application/json' } });
                 }
                 
                 if (action === 'add') {
                     let expireAt = null; let isBurn = 0;
                     if (body.expire === 'burn') isBurn = 1; else if (parseInt(body.expire) > 0) expireAt = Date.now() + parseInt(body.expire);
                     const newId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
-                    await db.query(`INSERT INTO proxy_notes (id, content, password, expireAt, isBurn, ip, geo, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [newId, body.content, body.password || '', expireAt, isBurn, clientIp, geoInfo, Date.now()]);
+                    await db.execute({
+                        sql: `INSERT INTO proxy_notes (id, content, password, expireAt, isBurn, ip, geo, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                        args: [newId, body.content, body.password || '', expireAt, isBurn, clientIp, geoInfo, Date.now()]
+                    });
                 } 
                 else if (action === 'update' || action === 'delete') {
-                    const [rows] = await db.query(`SELECT password FROM proxy_notes WHERE id = ?`, [body.id]);
-                    if (rows.length === 0) { await db.end(); return new Response(JSON.stringify({ error: "数据丢失" }), { status: 404 }); }
-                    const pwd = rows[0].password;
-                    if (pwd && pwd !== body.password && body.password !== adminPass) { await db.end(); return new Response(JSON.stringify({ error: "密码错误" }), { status: 403 }); }
-                    if (action === 'update') await db.query(`UPDATE proxy_notes SET content=?, ip=?, geo=? WHERE id=?`, [body.content, clientIp, geoInfo, body.id]);
-                    if (action === 'delete') await db.query(`DELETE FROM proxy_notes WHERE id=?`, [body.id]);
+                    const res = await db.execute({ sql: `SELECT password FROM proxy_notes WHERE id = ?`, args: [body.id] });
+                    if (res.rows.length === 0) return new Response(JSON.stringify({ error: "数据丢失" }), { status: 404 }); 
+                    const pwd = res.rows[0].password;
+                    if (pwd && pwd !== body.password && body.password !== adminPass) return new Response(JSON.stringify({ error: "密码错误" }), { status: 403 }); 
+                    if (action === 'update') await db.execute({ sql: `UPDATE proxy_notes SET content=?, ip=?, geo=? WHERE id=?`, args: [body.content, clientIp, geoInfo, body.id] });
+                    if (action === 'delete') await db.execute({ sql: `DELETE FROM proxy_notes WHERE id=?`, args: [body.id] });
                 }
 
-                const notes = await getPublicNotes(db); await db.end();
+                const notes = await getPublicNotes(db);
                 return new Response(JSON.stringify({ success: true, notes: notes }), { headers: { 'Content-Type': 'application/json' } });
-            } catch (e) { if(db) try{ await db.end(); }catch(err){} return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
+            } catch (e) { return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
         }
 
         const cookies = request.headers.get('Cookie') || '';
@@ -158,45 +156,43 @@ export default {
             if (!isAuth) return new Response(getAdminLoginHtml(cfgData), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 
             if (url.pathname === '/admin/api') {
-                let db;
                 try {
-                    db = await getDb(env);
+                    const db = getDb(env);
                     if (request.method === 'GET') {
-                        const [notes] = await db.query(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
-                        const [pNotes] = await db.query(`SELECT * FROM proxy_private_notes ORDER BY timestamp DESC`);
-                        const [logs] = await db.query(`SELECT * FROM proxy_visit_logs ORDER BY id DESC LIMIT 1000`);
+                        const notesRes = await db.execute(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
+                        const pNotesRes = await db.execute(`SELECT * FROM proxy_private_notes ORDER BY timestamp DESC`);
+                        const logsRes = await db.execute(`SELECT * FROM proxy_visit_logs ORDER BY id DESC LIMIT 1000`);
                         const fullData = {
                             ...cfgData,
-                            notes: notes.map(n => ({...n, isBurn: !!n.isBurn, timestamp: parseInt(n.timestamp)})),
-                            privateNotes: pNotes.map(n => ({...n, timestamp: parseInt(n.timestamp)})),
-                            visitLogs: logs.map(l => ({ ip: l.ip, geo: l.geo, action: l.action, time: parseInt(l.timestamp) }))
+                            notes: notesRes.rows.map(n => ({...n, isBurn: !!n.isBurn, timestamp: Number(n.timestamp)})),
+                            privateNotes: pNotesRes.rows.map(n => ({...n, timestamp: Number(n.timestamp)})),
+                            visitLogs: logsRes.rows.map(l => ({ ip: l.ip, geo: l.geo, action: l.action, time: Number(l.timestamp) }))
                         };
-                        await db.end(); return new Response(JSON.stringify(fullData), { headers: { 'Content-Type': 'application/json' } });
+                        return new Response(JSON.stringify(fullData), { headers: { 'Content-Type': 'application/json' } });
                     }
                     if (request.method === 'POST') {
                         const newCfg = await request.json();
-                        if (newCfg.action === 'clear_logs') { await db.query(`TRUNCATE TABLE proxy_visit_logs`); } 
-                        else if (newCfg.action === 'clear_notes') { await db.query(`TRUNCATE TABLE proxy_notes`); } 
-                        else if (newCfg.action === 'delete_note') { await db.query(`DELETE FROM proxy_notes WHERE id=?`, [newCfg.id]); } 
+                        if (newCfg.action === 'clear_logs') { await db.execute(`DELETE FROM proxy_visit_logs`); } 
+                        else if (newCfg.action === 'clear_notes') { await db.execute(`DELETE FROM proxy_notes`); } 
+                        else if (newCfg.action === 'delete_note') { await db.execute({ sql: `DELETE FROM proxy_notes WHERE id=?`, args: [newCfg.id] }); } 
                         else if (newCfg.action === 'add_private_note') {
                             const newId = Date.now().toString() + Math.random().toString(36).substr(2, 5);
-                            await db.query(`INSERT INTO proxy_private_notes (id, title, content, timestamp) VALUES (?, ?, ?, ?)`, [newId, newCfg.title || '未命名', newCfg.content || '', Date.now()]);
+                            await db.execute({ sql: `INSERT INTO proxy_private_notes (id, title, content, timestamp) VALUES (?, ?, ?, ?)`, args: [newId, newCfg.title || '未命名', newCfg.content || '', Date.now()] });
                         } 
-                        else if (newCfg.action === 'update_private_note') { await db.query(`UPDATE proxy_private_notes SET title=?, content=? WHERE id=?`, [newCfg.title, newCfg.content, newCfg.id]); } 
-                        else if (newCfg.action === 'delete_private_note') { await db.query(`DELETE FROM proxy_private_notes WHERE id=?`, [newCfg.id]); } 
+                        else if (newCfg.action === 'update_private_note') { await db.execute({ sql: `UPDATE proxy_private_notes SET title=?, content=? WHERE id=?`, args: [newCfg.title, newCfg.content, newCfg.id] }); } 
+                        else if (newCfg.action === 'delete_private_note') { await db.execute({ sql: `DELETE FROM proxy_private_notes WHERE id=?`, args: [newCfg.id] }); } 
                         else if (newCfg.action === 'save_config') {
-                            const saveKv = async (k, v) => await db.query(`INSERT INTO proxy_config (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v=VALUES(v)`, [k, v || '']);
+                            const saveKv = async (k, v) => await db.execute({ sql: `INSERT INTO proxy_config (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`, args: [k, v || ''] });
                             await saveKv('siteTitle', newCfg.siteTitle); await saveKv('subtitle', newCfg.subtitle);
                             await saveKv('allowedDomains', newCfg.allowedDomains); await saveKv('publicTags', newCfg.publicTags);
                             await saveKv('bgImageUrl', newCfg.bgImageUrl);
                             cachedConfig = null;
                         }
-                        const [updatedNotes] = await db.query(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
-                        const [updatedPNotes] = await db.query(`SELECT * FROM proxy_private_notes ORDER BY timestamp DESC`);
-                        await db.end();
-                        return new Response(JSON.stringify({ success: true, notes: updatedNotes.map(n => ({...n, isBurn: !!n.isBurn, timestamp: parseInt(n.timestamp)})), privateNotes: updatedPNotes.map(n => ({...n, timestamp: parseInt(n.timestamp)})) }), { headers: { 'Content-Type': 'application/json' } });
+                        const updatedNotes = await db.execute(`SELECT * FROM proxy_notes ORDER BY timestamp DESC`);
+                        const updatedPNotes = await db.execute(`SELECT * FROM proxy_private_notes ORDER BY timestamp DESC`);
+                        return new Response(JSON.stringify({ success: true, notes: updatedNotes.rows.map(n => ({...n, isBurn: !!n.isBurn, timestamp: Number(n.timestamp)})), privateNotes: updatedPNotes.rows.map(n => ({...n, timestamp: Number(n.timestamp)})) }), { headers: { 'Content-Type': 'application/json' } });
                     }
-                } catch (e) { if(db) try{ await db.end(); }catch(err){} return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
+                } catch (e) { return new Response(JSON.stringify({ error: e.message }), { status: 500 }); }
             }
             return new Response(getAdminHtml(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
         }
@@ -205,7 +201,7 @@ export default {
         
         if (url.pathname === "/") { 
             ctx.waitUntil(logVisit(env, request, '浏览首页'));
-            let notesData = []; try { const db = await getDb(env); notesData = await getPublicNotes(db); await db.end(); } catch(e){}
+            let notesData = []; try { const db = getDb(env); notesData = await getPublicNotes(db); } catch(e){}
             return new Response(getHtml(url.host, config, notesData), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }); 
         }
         
@@ -243,7 +239,7 @@ export default {
         if (!actualUrlStr.startsWith('http')) {
             if (actualUrlStr.includes('.') && !actualUrlStr.startsWith('favicon')) { actualUrlStr = 'https://' + actualUrlStr; } 
             else { 
-                let notesData = []; try { const db = await getDb(env); notesData = await getPublicNotes(db); await db.end(); } catch(e){}
+                let notesData = []; try { const db = getDb(env); notesData = await getPublicNotes(db); } catch(e){}
                 return new Response(getHtml(url.host, config, notesData), { headers: { 'Content-Type': 'text/html; charset=utf-8' } }); 
             }
         }
