@@ -4,10 +4,11 @@ compatibility_date = "2026-08-18"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
-# 你的后台管理员密码
+# 你的后台管理员密码，建议改得复杂一点
 ADMIN_PASS = "admin"
 
-# 绑定你的 Hyperdrive
-[[hyperdrive]]
-binding = "HYPERDRIVE"
-id = "73d601307e2d4dfd9837de568bfacba8"
+# 你真实的 Turso 数据库地址
+TURSO_DB_URL = "libsql://proxy-db-freex480.aws-us-west-2.turso.io"
+
+# 你真实的 Turso 数据库访问 Token
+TURSO_AUTH_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODcwNTQzMTIsImlkIjoiMDFhMDE0YjQtNjQwMS03YzdhLWEwYzgtMWU4NjMyY2M3YTgxIiwia2lkIjoiN09OVXpwODVuSGlERHNkV2t3bVFpR0hZQ0FNRFYydTk1LXFMU05hV1JYRSIsInJpZCI6ImU1NDZlOGQ0LTU0YzQtNDNlYy1hZDU0LTliNjg4OWY5YjZmZCJ9.ty8Dv3VQIm5AV8wo21-F4YXE59iFW2nFeQCq_lzUF9VtMhGe2msOFf1fA7OHd2M5G6-uMZF5vCP22cAeAYTmCQ"
