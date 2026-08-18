@@ -1,6 +1,7 @@
 name = "cf-proxy-mysql"
 main = "src/index.js"
-compatibility_date = "2024-04-01"
+# 直接拉满到最新日期，享受最完整、最稳定的 Node.js 兼容特性
+compatibility_date = "2026-08-18"
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
