@@ -1,0 +1,8 @@
+{
+  "name": "cf-proxy-mysql",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "dependencies": {
+    "mysql2": "^3.9.7"
+  }
+}
