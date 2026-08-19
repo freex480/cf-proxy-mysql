@@ -19,3 +19,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # 👇 这里是新增的魔法！将 GitHub 的机密直接注入为 Cloudflare 环境变量
+          secrets: |
+            ADMIN_PASS
+            TURSO_DB_URL
+            TURSO_AUTH_TOKEN
+        # 这里指明从 GitHub 环境中读取这些同名的变量传递过去
+        env:
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+          TURSO_DB_URL: ${{ secrets.TURSO_DB_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
