@@ -8,23 +8,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
+          
       - name: Install dependencies
         run: npm install
+        
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          # 👇 这里是新增的魔法！将 GitHub 的机密直接注入为 Cloudflare 环境变量
+          command: deploy
           secrets: |
             ADMIN_PASS
             TURSO_DB_URL
             TURSO_AUTH_TOKEN
-        # 这里指明从 GitHub 环境中读取这些同名的变量传递过去
         env:
           ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
           TURSO_DB_URL: ${{ secrets.TURSO_DB_URL }}
