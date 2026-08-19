@@ -16,18 +16,21 @@ jobs:
           
       - name: Install dependencies
         run: npm install
-        
-      - name: Deploy to Cloudflare Workers
+
+      # 第四步：强行注入变量 (绕过报错)
+      - name: Put Secrets Manually
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          echo "${{ secrets.ADMIN_PASS }}" | npx wrangler secret put ADMIN_PASS
+          echo "${{ secrets.TURSO_DB_URL }}" | npx wrangler secret put TURSO_DB_URL
+          echo "${{ secrets.TURSO_AUTH_TOKEN }}" | npx wrangler secret put TURSO_AUTH_TOKEN
+
+      # 第五步：干干净净地部署代码
+      - name: Deploy to Cloudflare
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy
-          secrets: |
-            ADMIN_PASS
-            TURSO_DB_URL
-            TURSO_AUTH_TOKEN
-        env:
-          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
-          TURSO_DB_URL: ${{ secrets.TURSO_DB_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
